@@ -3,11 +3,13 @@ import MarauderCore
 
 struct NetworksView: View {
     @EnvironmentObject var model: AppModel
+    @State private var showingWatchlist = false
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top) {
                 SectionHeader(title: "Nearby networks", subtitle: model.demo ? "A simulated workspace to explore before connecting." : "Discover access points and inspect their associated stations.")
                 Spacer()
+                Button("Watchlist (\(model.watchedBSSIDs.count))", systemImage: "eye") { showingWatchlist = true }
                 Button("Scan", systemImage: "wifi") { model.send(model.scanAP) }.buttonStyle(.borderedProminent).disabled(!model.canSend)
             }
             HStack(spacing: 12) {
@@ -47,6 +49,33 @@ struct NetworksView: View {
                 Text(model.selectedNetworks.isEmpty ? "Select a network to inspect it" : "\(model.selectedNetworks.count) selected")
             }.font(.system(size: 10)).foregroundStyle(.secondary)
         }.padding(20).background(Color(nsColor: .windowBackgroundColor))
+        .sheet(isPresented: $showingWatchlist) { watchlist }
+    }
+    private var watchlist: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeader(title: "Watchlist", subtitle: "Channel and signal update when a scan observes one of your checked access points.")
+            if model.watchedNetworks.isEmpty {
+                ContentUnavailableView("No watched networks in the scan results", systemImage: "eye",
+                    description: Text("Scan nearby networks and check the ones you want to follow in the Watch column."))
+            } else {
+                Table(model.watchedNetworks) {
+                    TableColumn("Network", value: \.displayName)
+                    TableColumn("BSSID") { ap in Text(ap.id).font(.system(.caption, design: .monospaced)) }.width(130)
+                    TableColumn("CH") { ap in Text(String(ap.channel)) }.width(36)
+                    TableColumn("Signal") { ap in SignalView(rssi: ap.rssi) }.width(78)
+                    TableColumn("Last seen") { ap in
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            Text(ap.lastSeen.map { relativeAge($0, now: context.date) } ?? "—")
+                        }
+                    }.width(82)
+                }
+            }
+            HStack {
+                Button("Clear watchlist") { model.watchedBSSIDs.removeAll() }.disabled(model.watchedBSSIDs.isEmpty)
+                Spacer()
+                Button("Done") { showingWatchlist = false }.keyboardShortcut(.defaultAction)
+            }
+        }.padding(20).frame(width: 650, height: 360)
     }
     @ViewBuilder private var networkTable: some View {
         if model.filteredNetworks.isEmpty {
@@ -66,6 +95,17 @@ struct NetworksView: View {
     }
     private var populatedTable: some View {
         Table(model.filteredNetworks, selection: $model.selectedNetworks) {
+            TableColumn("Watch") { ap in
+                if let bssid = ap.bssid {
+                    Toggle("Watch \(ap.displayName), \(bssid)", isOn: Binding(
+                        get: { model.watchedBSSIDs.contains(bssid) },
+                        set: { watch in
+                            if watch { model.watchedBSSIDs.insert(bssid) }
+                            else { model.watchedBSSIDs.remove(bssid) }
+                        }
+                    )).toggleStyle(.checkbox).labelsHidden()
+                }
+            }.width(45)
             TableColumn("Network") { ap in
                 HStack(spacing: 8) {
                     Image(systemName: ap.isHidden ? "eye.slash" : "wifi").foregroundStyle(ap.isHidden ? .secondary : .primary)

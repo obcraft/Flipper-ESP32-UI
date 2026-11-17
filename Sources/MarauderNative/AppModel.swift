@@ -34,6 +34,7 @@ final class AppModel: ObservableObject {
     @Published var error: String?
     @Published var networks: [AccessPoint] = []
     @Published var selectedNetworks = Set<String>()
+    @Published var watchedBSSIDs = Set<String>()
     @Published var terminal: [TerminalLine] = []
     @Published var history: [String] = []
     @Published var command = ""
@@ -84,6 +85,12 @@ final class AppModel: ObservableObject {
     var workflow: Workflow { Workflow.catalog.first { $0.id == selectedWorkflow } ?? Workflow.catalog[0] }
     var selectedAP: AccessPoint? { networks.first { selectedNetworks.contains($0.id) } }
     var stationCount: Int { Set(networks.flatMap { $0.stations.map(\.mac) }).count }
+    var watchedNetworks: [AccessPoint] {
+        networks.filter { watchedBSSIDs.contains($0.id) }.sorted { a, b in
+            let order = a.displayName.localizedStandardCompare(b.displayName)
+            return order == .orderedSame ? a.id < b.id : order == .orderedAscending
+        }
+    }
     var filteredNetworks: [AccessPoint] {
         networks.filter { ap in
             search.isEmpty || ap.displayName.localizedCaseInsensitiveContains(search) || (ap.bssid ?? "").localizedCaseInsensitiveContains(search) || ap.stations.contains { $0.mac.localizedCaseInsensitiveContains(search) }
@@ -130,6 +137,7 @@ final class AppModel: ObservableObject {
     func shutdown() { automation.cancel(); if automationRunning { try? port.send("stopscan") }; timer?.invalidate(); port.close() }
     private func resetSession() {
         inventory.clear(); networks = []; selectedNetworks = []; terminal = []; framer.reset()
+        watchedBSSIDs.removeAll()
         receivedBytes = 0; transmittedBytes = 0; receivedMessageCount = 0; lastReceivedAt = nil; demoSelectedIndices = []; operation = nil; stopPending = false
         completedSteps = []; workflowCursor = 0; workflowValues = [:]
     }
