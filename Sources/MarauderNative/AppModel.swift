@@ -144,7 +144,7 @@ final class AppModel: ObservableObject {
         do {
             try port.open(path: selectedPort, baud: baud)
             resetSession()
-            connected = true; connectTime = nil; sessionStarted = Date(); status = "USB connected · ready for commands"; error = nil
+            connected = true; connectTime = nil; sessionStarted = Date(); status = "Port open · ESP32 unconfirmed"; error = nil
             append("Opened \(selectedPort) at \(baud) baud · 8N1", .info)
             append("Connection open. Use Check connection or send help to read the supported commands.", .info)
         } catch { self.error = error.localizedDescription; append(error.localizedDescription, .error) }
@@ -319,7 +319,10 @@ final class AppModel: ObservableObject {
             let bytes = try port.readAvailable()
             if !bytes.isEmpty {
                 receivedBytes += bytes.count
-                for line in framer.append(bytes) { receive(line) }
+                for line in framer.append(bytes) {
+                    receive(line)
+                    if !connected { return }
+                }
                 if wifiJoin?.step == .joining, let prompt = framer.takeWiFiJoinPrompt() { receive(prompt) }
                 networks = Array(inventory.accessPoints.values)
             }
@@ -361,6 +364,15 @@ final class AppModel: ObservableObject {
             return
         }
         append(line, .received)
+        if connected && line == "Welcome to Flipper Zero Command Line Interface!" {
+            disconnect()
+            destination = .connection
+            status = "Disconnected · Flipper CLI detected"
+            let message = "The Flipper CLI answered on this port. Open GPIO → USB-UART Bridge on the Flipper, leave the TX/RX screen open, then reconnect."
+            error = message
+            append(message, .error)
+            return
+        }
         if automationRunning && (line.lowercased().hasPrefix("error") || line.lowercased().hasPrefix("invalid") || line.lowercased().hasPrefix("unknown command") || line.lowercased().hasPrefix("failed") || line.lowercased().contains("command not found") || line.lowercased().hasPrefix("you don't have any targets")) {
             automationFailure = "The firmware rejected an operation: \(line)"
         }
