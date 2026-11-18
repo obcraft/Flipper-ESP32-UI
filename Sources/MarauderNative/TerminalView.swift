@@ -50,7 +50,7 @@ struct TerminalView: View {
                     Button("Clear history") { model.clearHistory() }
                 } label: { Image(systemName: "clock.arrow.circlepath") }.menuStyle(.borderlessButton).frame(width: 24).help("Command history · ↑ / ↓")
                 Button("Send", systemImage: "arrow.up") { model.sendInput() }.buttonStyle(.borderedProminent).controlSize(.small)
-                    .disabled(!model.canSend || model.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!model.canSend || model.wifiJoinInProgress || model.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.padding(.horizontal, 16).padding(.vertical, 10).background(.bar)
         }
     }

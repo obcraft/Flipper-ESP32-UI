@@ -11,7 +11,7 @@ Open **`dist/Marauder.app`** in Finder. It runs directly from this folder; you c
 3. Set **USB channel 0**, **115200 baud**, and leave the bridge running.
 4. In the Mac app, open **Connection**, select the Flipper serial port, and click **Connect**.
 5. Click **Check connection** to request `help`. The terminal should show commands supported by your firmware.
-6. Open **Networks** and start a scan. Stop it before switching operations; **List access points** retrieves the firmware indices used by workflows.
+6. Open **Networks** and click **Scan**. Use **Stop Scan** to end discovery. If the ESP32 sends zero bytes in five seconds, the app reports the missing response and lets you retry.
 
 Connecting only opens the serial port. It does not start scans, transmit wireless packets, or automatically send `info`. Baud, framing (8N1), and LF line endings match the documented bridge defaults. qFlipper or another serial monitor can keep the port busy.
 
@@ -21,7 +21,7 @@ Connecting only opens the serial port. It does not start scans, transmit wireles
 - A network-first layout with a bounded, draggable terminal and a details inspector shown only for a selected network.
 - USB serial discovery, exclusive port access, nonblocking buffered I/O, unplug handling, and byte counters.
 - Current (`sniffbeacon` / `scanall`) and classic (`scanap` / `scansta`) command profiles.
-- AP and station discovery, search, sorting, signal strength, selection state, and honest observation timestamps.
+- AP and station discovery, search, sorting, signal strength, selection state, and observation timestamps.
 - Separate identities for distinct BSSIDs sharing a name/channel. The firmware's name-only list entries stay unresolved if a MAC cannot be matched unambiguously.
 - Station MAC addresses and last-observed times. Authoritative station indices are read from `list -c` in the terminal; scan event numbers are not treated as indices.
 - Custom commands, 50 locally persisted history entries, ↑/↓ recall, output filtering, terminal clearing, and plain-text log export.
@@ -33,6 +33,14 @@ Connecting only opens the serial port. It does not start scans, transmit wireles
 
 Workflow support depends on the installed firmware. Current-profile signal monitoring uses `foxhunt -w` with one AP index. Classic-profile monitoring uses `sigmon`. The global Stop sends `stopscan`. “Mark stopped” is a manual fallback only after checking the terminal when a firmware build uses an unrecognized acknowledgement. Sent workflow steps indicate transmission, not firmware success.
 
+## Join a 2.4 GHz Wi-Fi network
+
+After a scan finds your network, select its row in **Networks** and click **Join Wi-Fi…**. Enter the Wi-Fi password, or leave it blank for an open network, then click **Connect**. The app stops radio activity, refreshes the firmware's AP list, verifies the selected BSSID and channel, and reports the firmware's join result.
+
+The ESP32-S2 associates on 2.4 GHz. Marauder v1.20.0 uses the selected index to look up the SSID and associates by SSID, so the firmware can use another 2.4 GHz AP that shares the same name. The app hides the password from its terminal, history and exports. Marauder can save the credential on the ESP32. [Marauder Join WiFi documentation](https://github.com/justcallmekoko/ESP32Marauder/wiki/join)
+
+If **Scan** and **Connection → Check connection** both leave RX at 0 B, reopen **GPIO → USB-UART Bridge** on the Flipper, verify **USB channel 0** and **115200 baud**, and check that the ESP32 board is seated. [Marauder Flipper connection guide](https://github.com/justcallmekoko/ESP32Marauder/wiki/Flipper-Zero)
+
 ## Paste a network and prepare an automatic sequence
 
 Open **Workflows → Paste a network**, then paste a single macOS Wi-Fi record containing a quoted name, `bssid=…` and `channel=[…]`. The preview extracts the MAC address, channel, width, RSSI, country and Wi-Fi type. Importing sends nothing to the device.
@@ -43,7 +51,6 @@ Choose and reorder actions, set 5–120 seconds per timed action, then explicitl
 
 Each sequence stops existing work, discovers for 10 seconds, waits for a stop acknowledgement, reads a fresh AP list, requires a recently observed BSSID/channel with an unambiguous index, adjusts selection, and re-reads the list to verify exclusive selection. It then sets the channel and runs the chosen actions. Every timed action ends in an acknowledged stop. Missing responses, connection loss, unresolvable indices and recognized firmware errors stop the sequence. Stop cancels pending steps; unrelated manual commands are blocked while the sequence runs.
 
-“Attach”/joining Wi-Fi is not part of these actions: the requested meaning and any credential handling still need to be defined. This UI update does not silently connect the ESP32 to an imported network.
 
 ## Verified hardware connection
 

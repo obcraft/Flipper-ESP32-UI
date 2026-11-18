@@ -9,7 +9,7 @@ final class TargetPlanRunner {
     private var task: Task<Void, Never>?
     init(model: AppModel) { self.model = model }
     func start(_ configuration: TargetPlanConfiguration) {
-        guard let model, task == nil, model.canSend else { return }
+        guard let model, task == nil, model.canSend, !model.wifiJoinInProgress else { return }
         model.automationFailure = nil
         model.automationRunning = true
         model.automationStatus = "Preparing target discovery…"

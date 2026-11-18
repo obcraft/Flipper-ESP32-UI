@@ -65,6 +65,8 @@ final class AppModel: ObservableObject {
     @Published var completedSteps = Set<Int>()
     @Published var workflowCursor = 0
     @Published var operation: String?
+    @Published private(set) var wifiJoinInProgress = false
+    @Published private(set) var wifiJoinStatus: String?
     @Published var sessionStarted: Date?
     private let port = SerialPort()
     private var inventory = NetworkInventory()
@@ -78,12 +80,26 @@ final class AppModel: ObservableObject {
     private var stopRequestedAt: Date?
     private var connectTime: Date?
     private var probeStartBytes = 0
+    private var wifiJoin: WiFiJoin?
+    private var wifiJoinDeadline: ContinuousClock.Instant?
+    private var scanResponseDeadline: ContinuousClock.Instant?
+    private var scanStartBytes = 0
+    private let noSerialResponse = "The ESP32 sent no data. On the Flipper, reopen GPIO → USB-UART Bridge with USB channel 0 and 115200 baud, and check that the Wi-Fi board is seated."
     var canSend: Bool { connected || demo }
     var profileName: String { modernFirmware ? "Current firmware" : "Classic firmware" }
     var scanAP: String { modernFirmware ? "sniffbeacon" : "scanap" }
     var scanStations: String { modernFirmware ? "scanall" : "scansta" }
     var workflow: Workflow { Workflow.catalog.first { $0.id == selectedWorkflow } ?? Workflow.catalog[0] }
     var selectedAP: AccessPoint? { networks.first { selectedNetworks.contains($0.id) } }
+    var canJoinWiFi: Bool { canSend && !automationRunning && !wifiJoinInProgress && !stopPending }
+    var isScanningNetworks: Bool { operation == scanAP }
+    var canControlNetworkScan: Bool {
+        canJoinWiFi && (operation == nil || isScanningNetworks)
+    }
+    var networkScanStatus: String? {
+        guard isScanningNetworks else { return nil }
+        return stopPending ? "Stopping the scan…" : "Scanning for nearby access points…"
+    }
     var stationCount: Int { Set(networks.flatMap { $0.stations.map(\.mac) }).count }
     var watchedNetworks: [AccessPoint] {
         networks.filter { watchedBSSIDs.contains($0.id) }.sorted { a, b in
@@ -105,6 +121,11 @@ final class AppModel: ObservableObject {
     }
     init() {
         history = UserDefaults.standard.stringArray(forKey: "commandHistory") ?? []
+        let safeHistory = history.filter { !WiFiJoinCommand.isJoinCommand($0) }
+        if safeHistory != history {
+            history = safeHistory
+            UserDefaults.standard.set(safeHistory, forKey: "commandHistory")
+        }
         if UserDefaults.standard.object(forKey: "modernFirmware") != nil { modernFirmware = UserDefaults.standard.bool(forKey: "modernFirmware") }
         refreshPorts()
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
@@ -130,12 +151,16 @@ final class AppModel: ObservableObject {
     }
     func disconnect() {
         automation.cancel()
+        finishWiFiJoin(wifiJoinInProgress ? "USB connection closed during Wi-Fi join." : nil)
+        scanResponseDeadline = nil
         port.close(); connected = false; operation = nil; stopPending = false; connectTime = nil
         framer.reset(); status = "Disconnected"
         append("Serial connection closed. USB-UART Bridge is controlled on your Flipper.", .info)
     }
     func shutdown() { automation.cancel(); if automationRunning { try? port.send("stopscan") }; timer?.invalidate(); port.close() }
     private func resetSession() {
+        finishWiFiJoin()
+        scanResponseDeadline = nil
         inventory.clear(); networks = []; selectedNetworks = []; terminal = []; framer.reset()
         watchedBSSIDs.removeAll()
         receivedBytes = 0; transmittedBytes = 0; receivedMessageCount = 0; lastReceivedAt = nil; demoSelectedIndices = []; operation = nil; stopPending = false
@@ -144,6 +169,7 @@ final class AppModel: ObservableObject {
     @discardableResult func send(_ raw: String, fromAutomation: Bool = false) -> Bool {
         do {
             let value = try CommandValidation.validate(raw)
+            guard !wifiJoinInProgress else { throw ValidationError("Wait for the Wi-Fi join to finish before sending a command.") }
             if automationRunning && !fromAutomation {
                 if value == "stopscan" { automation.cancel() }
                 else { throw ValidationError("Stop the automatic sequence before sending a separate command.") }
@@ -151,24 +177,94 @@ final class AppModel: ObservableObject {
             guard canSend else { throw ValidationError("Connect your Flipper, or open the demo, before sending commands.") }
             let startsOperation = value.hasPrefix("sniff") || value.hasPrefix("scan") || value.hasPrefix("attack ") || value.hasPrefix("wardrive") || value == "sigmon" || value.hasPrefix("foxhunt ")
             if startsOperation && operation != nil { throw ValidationError("Stop the current operation and wait for its response before starting another.") }
-            if demo { append(value, .command); simulate(value) }
+            let isJoin = WiFiJoinCommand.isJoinCommand(value)
+            let display = isJoin ? "join [credentials hidden]" : value
+            if demo { append(display, .command); simulate(value) }
             else {
                 try port.send(value, lineEnding: lineEnding)
                 transmittedBytes += value.utf8.count + lineEnding.utf8.count
-                append(value, .command)
+                append(display, .command)
             }
             if value == "help" && !demo { connectTime = Date(); probeStartBytes = receivedBytes }
             if value == "list -a" { inventory.invalidateIndices(); networks = Array(inventory.accessPoints.values); if demo { demoList() } }
             if startsOperation { operation = value }
             if value == "stopscan" {
+                scanResponseDeadline = nil
                 if demo { operation = nil; stopPending = false }
                 else { stopPending = true; stopRequestedAt = Date() }
             }
-            history.removeAll { $0 == value }; history.insert(value, at: 0)
-            history = Array(history.prefix(50)); UserDefaults.standard.set(history, forKey: "commandHistory")
+            if !isJoin {
+                history.removeAll { $0 == value }; history.insert(value, at: 0)
+                history = Array(history.prefix(50)); UserDefaults.standard.set(history, forKey: "commandHistory")
+            }
             historyIndex = -1; error = nil
             return true
         } catch { self.error = error.localizedDescription; append(error.localizedDescription, .error); return false }
+    }
+    func startNetworkScan() {
+        guard canControlNetworkScan, !isScanningNetworks else { return }
+        wifiJoinStatus = nil
+        scanStartBytes = receivedBytes
+        if send(scanAP), !demo { scanResponseDeadline = ContinuousClock.now.advanced(by: .seconds(5)) }
+    }
+    func joinNetwork(_ ap: AccessPoint, password: String) throws {
+        guard canJoinWiFi else { throw ValidationError("Connect the Flipper and wait for any pending operation to finish.") }
+        guard let current = inventory.accessPoints[ap.id], current.ssid == ap.ssid, current.channel == ap.channel else {
+            throw ValidationError("This access point changed. Select it again from the scan results.")
+        }
+        wifiJoin = try WiFiJoin(target: current, password: password)
+        wifiJoinInProgress = true
+        error = nil
+        do {
+            try advanceWiFiJoin(.send("stopscan"))
+        } catch {
+            finishWiFiJoin()
+            throw error
+        }
+    }
+    private func advanceWiFiJoin(_ update: WiFiJoin.Update) throws {
+        guard let step = wifiJoin?.step else { return }
+        wifiJoinStatus = step.message
+        wifiJoinDeadline = ContinuousClock.now.advanced(by: .seconds(step.timeout))
+        switch update {
+        case .send(let value):
+            if value == "list -a" {
+                operation = nil
+                inventory.invalidateIndices()
+                networks = Array(inventory.accessPoints.values)
+            }
+            append(value, .command)
+            if demo {
+                receive("#\(value)")
+                simulate(value)
+                if value == "list -a" { demoList(); receive("0 selected") }
+            } else {
+                try port.send(value, lineEnding: lineEnding)
+                transmittedBytes += value.utf8.count + lineEnding.utf8.count
+            }
+        case .sendCredentials(let command):
+            append("join [credentials hidden]", .command)
+            if demo, let ssid = wifiJoin?.target.ssid {
+                receive("Using SSID: \(ssid)")
+                receive("Connecting to WiFi...> ")
+            } else {
+                try port.send(command, lineEnding: lineEnding)
+                transmittedBytes += command.wireValue.utf8.count + lineEnding.utf8.count
+            }
+        case .joined:
+            guard let target = wifiJoin?.target else { return }
+            let prefix = demo ? "Demo · ESP32 joined" : "ESP32 joined"
+            let message = "\(prefix) \(target.displayName) on 2.4 GHz."
+            finishWiFiJoin(message)
+            append(message, .info)
+        }
+    }
+    private func finishWiFiJoin(_ message: String? = nil, failed: Bool = false) {
+        wifiJoin = nil
+        wifiJoinDeadline = nil
+        wifiJoinInProgress = false
+        wifiJoinStatus = message
+        if failed, let message { error = message; append(message, .error) }
     }
     func sendInput() { if send(command) { command = "" } }
     func historyPrevious() {
@@ -204,6 +300,7 @@ final class AppModel: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
     func acknowledgeStopped() {
+        guard !wifiJoinInProgress else { return }
         // Explicit user verification for firmware that does not emit a recognized stop message.
         operation = nil; stopPending = false
         append("Operation marked stopped after reviewing device output.", .info)
@@ -223,23 +320,46 @@ final class AppModel: ObservableObject {
             if !bytes.isEmpty {
                 receivedBytes += bytes.count
                 for line in framer.append(bytes) { receive(line) }
+                if wifiJoin?.step == .joining, let prompt = framer.takeWiFiJoinPrompt() { receive(prompt) }
                 networks = Array(inventory.accessPoints.values)
             }
-            if let started = connectTime, Date().timeIntervalSince(started) > 5, receivedBytes == probeStartBytes {
-                status = "Port open · no device response"
-                error = "No Marauder response. Check USB channel 0 and 115200 baud on the Flipper, and make sure the Wi-Fi board is attached. Close qFlipper if it is using the port."
+            if let started = connectTime, Date().timeIntervalSince(started) > 5 {
+                if receivedBytes == probeStartBytes { reportNoSerialResponse() }
                 connectTime = nil
+            }
+            if let deadline = scanResponseDeadline, ContinuousClock.now >= deadline {
+                scanResponseDeadline = nil
+                if isScanningNetworks && receivedBytes == scanStartBytes {
+                    operation = nil
+                    reportNoSerialResponse()
+                }
             }
             if stopPending, let requested = stopRequestedAt, Date().timeIntervalSince(requested) > 4 {
                 error = "Stop sent, but no recognized acknowledgement. Check the terminal; use “Mark stopped” only once the device has stopped."
                 stopRequestedAt = nil
             }
+            if let step = wifiJoin?.step, let deadline = wifiJoinDeadline, ContinuousClock.now >= deadline {
+                let message = step == .joining
+                    ? "The ESP32 did not report a Wi-Fi join result."
+                    : "The ESP32 did not finish Wi-Fi join preparation. Check the terminal and retry."
+                finishWiFiJoin(message, failed: true)
+            }
         } catch { disconnect(); self.error = error.localizedDescription; append(error.localizedDescription, .error) }
+    }
+    private func reportNoSerialResponse() {
+        status = "Port open · no device response"
+        error = noSerialResponse
+        append(noSerialResponse, .error)
     }
     private func receive(_ raw: String) {
         let line = MarauderParser.clean(raw)
         guard !line.isEmpty else { return }
         receivedMessageCount += 1; lastReceivedAt = Date()
+        let reply = line.hasPrefix("> ") ? line.dropFirst(2) : line[...]
+        if (reply.hasPrefix("#") || wifiJoin?.step == .joining) && WiFiJoinCommand.isJoinCommand(line) {
+            append("join [credentials hidden]", .received)
+            return
+        }
         append(line, .received)
         if automationRunning && (line.lowercased().hasPrefix("error") || line.lowercased().hasPrefix("invalid") || line.lowercased().hasPrefix("unknown command") || line.lowercased().hasPrefix("failed") || line.lowercased().contains("command not found") || line.lowercased().hasPrefix("you don't have any targets")) {
             automationFailure = "The firmware rejected an operation: \(line)"
@@ -248,10 +368,12 @@ final class AppModel: ObservableObject {
         if lower.contains("guru meditation") || lower.contains("panic'ed") {
             status = "ESP32 firmware crashed"; operation = nil; automationFailure = "The ESP32 firmware crashed."
             error = "The ESP32 reported a firmware crash. Wait for its boot message before sending another command. The serial connection remains open."
+            if wifiJoinInProgress { finishWiFiJoin("The ESP32 crashed during Wi-Fi join.") }
         }
         if lower == "rebooting..." || lower.hasPrefix("esp-rom:") {
             status = "ESP32 restarting"; operation = nil; if automationRunning { automationFailure = "The ESP32 restarted during the sequence." }
             inventory.clear(); networks = []; selectedNetworks = []; workflowValues = [:]; completedSteps = []; workflowCursor = 0
+            if wifiJoinInProgress { finishWiFiJoin("The ESP32 restarted during Wi-Fi join.", failed: true) }
         }
         if lower.contains("============ commands") { status = "Marauder responding"; connectTime = nil }
         if lower.contains("marauder") { status = "Marauder responding"; connectTime = nil }
@@ -262,6 +384,9 @@ final class AppModel: ObservableObject {
         if lower.contains("unknown command") || lower.contains("invalid command") || lower.contains("command not found") {
             operation = nil; error = "This firmware did not recognize the command. Read Help or change the firmware profile in Connection."
         }
+        do {
+            if let update = try wifiJoin?.receive(line) { try advanceWiFiJoin(update) }
+        } catch { finishWiFiJoin(error.localizedDescription, failed: true) }
     }
     private func append(_ text: String, _ kind: TerminalLine.Kind) {
         sequence += 1; terminal.append(TerminalLine(id: sequence, date: Date(), text: text, kind: kind))
@@ -294,6 +419,13 @@ final class AppModel: ObservableObject {
         networks = Array(inventory.accessPoints.values)
     }
     private func simulate(_ command: String) {
+        if command.hasPrefix("info -a "), let index = Int(command.dropFirst("info -a ".count)), demoNames.indices.contains(index) {
+            receive("ESSID: \(demoNames[index])")
+            receive("BSSID: \(demoMAC(index))")
+            receive("Channel: \(demoChannels[index])")
+            receive("Security: WPA2")
+            return
+        }
         if command.hasPrefix("select -a ") {
             for field in command.dropFirst(10).split(separator: ",") {
                 if let index = Int(field.trimmingCharacters(in: .whitespaces)) {

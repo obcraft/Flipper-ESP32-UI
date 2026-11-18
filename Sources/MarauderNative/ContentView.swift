@@ -108,7 +108,7 @@ struct ContentView: View {
         }
         ToolbarItemGroup(placement: .primaryAction) {
             Button { model.send("stopscan") } label: { HStack(spacing: 5) { Image(systemName: "stop.fill"); Text("Stop") } }
-                .tint(.red).disabled(!model.canSend).help("Stop the active device operation (⌘.)")
+                .tint(.red).disabled(!model.canSend || model.wifiJoinInProgress).help("Stop the active device operation (⌘.)")
             Divider()
             if model.connected {
                 Button { model.disconnect() } label: { HStack(spacing: 5) { Image(systemName: "cable.connector.slash"); Text("Disconnect") } }

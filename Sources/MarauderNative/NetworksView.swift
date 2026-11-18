@@ -4,13 +4,29 @@ import MarauderCore
 struct NetworksView: View {
     @EnvironmentObject var model: AppModel
     @State private var showingWatchlist = false
+    @State private var joinTarget: AccessPoint?
+    private var eligibleJoinTarget: AccessPoint? {
+        guard model.selectedNetworks.count == 1, let ap = model.selectedAP, WiFiJoin.canJoin(ap) else { return nil }
+        return ap
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top) {
                 SectionHeader(title: "Nearby networks", subtitle: model.demo ? "A simulated workspace to explore before connecting." : "Discover access points and inspect their associated stations.")
                 Spacer()
                 Button("Watchlist (\(model.watchedBSSIDs.count))", systemImage: "eye") { showingWatchlist = true }
-                Button("Scan", systemImage: "wifi") { model.send(model.scanAP) }.buttonStyle(.borderedProminent).disabled(!model.canSend)
+                Button("Join Wi-Fi…", systemImage: "wifi") { joinTarget = eligibleJoinTarget }
+                    .disabled(eligibleJoinTarget == nil || !model.canJoinWiFi)
+                    .help("Select one named 2.4 GHz access point from the scan")
+                Button(model.isScanningNetworks ? "Stop Scan" : "Scan", systemImage: model.isScanningNetworks ? "stop.fill" : "magnifyingglass") {
+                    if model.isScanningNetworks { model.send("stopscan") } else { model.startNetworkScan() }
+                }.buttonStyle(.borderedProminent).disabled(!model.canControlNetworkScan)
+            }
+            if let message = model.wifiJoinStatus ?? model.networkScanStatus {
+                HStack(spacing: 8) {
+                    if model.wifiJoinInProgress || model.wifiJoinStatus == nil { ProgressView().controlSize(.small) }
+                    Text(message).font(.callout)
+                }.accessibilityElement(children: .combine)
             }
             HStack(spacing: 12) {
                 Metric(label: "Access points", value: "\(model.networks.filter { $0.bssid != nil }.count)", symbol: "wifi")
@@ -50,6 +66,7 @@ struct NetworksView: View {
             }.font(.system(size: 10)).foregroundStyle(.secondary)
         }.padding(20).background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $showingWatchlist) { watchlist }
+        .sheet(item: $joinTarget) { ap in WiFiJoinSheet(accessPoint: ap) }
     }
     private var watchlist: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -159,6 +176,45 @@ struct NetworksView: View {
     }
     private func detail(_ label: String, _ value: String) -> some View {
         HStack(alignment: .top) { Text(label).foregroundStyle(.secondary); Spacer(); Text(value).multilineTextAlignment(.trailing) }.font(.caption)
+    }
+}
+
+private struct WiFiJoinSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var password = ""
+    @State private var validationMessage: String?
+    @FocusState private var passwordFocused: Bool
+    let accessPoint: AccessPoint
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SectionHeader(title: "Join \(accessPoint.displayName)", subtitle: "2.4 GHz · Channel \(accessPoint.channel) as scanned")
+            if let bssid = accessPoint.bssid {
+                Text(bssid).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                SecureField("Wi-Fi password", text: $password)
+                    .textFieldStyle(.roundedBorder).focused($passwordFocused)
+                Text("Leave the password blank for an open network. Marauder can save credentials on the ESP32.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let validationMessage {
+                Text(validationMessage).font(.callout).foregroundStyle(.red)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Connect") {
+                    do {
+                        try model.joinNetwork(accessPoint, password: password)
+                        password = ""
+                        dismiss()
+                    } catch { validationMessage = error.localizedDescription }
+                }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent).disabled(!model.canJoinWiFi)
+            }
+        }.padding(24).frame(width: 420)
+            .onAppear { passwordFocused = true }
     }
 }
 

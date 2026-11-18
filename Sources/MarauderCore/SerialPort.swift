@@ -68,10 +68,15 @@ public final class SerialPort {
         descriptor = -1; original = nil; path = nil; pendingWrites.removeAll()
     }
     public func send(_ command: String, lineEnding: String = "\n") throws {
+        try writeCommand(CommandValidation.validate(command), lineEnding: lineEnding)
+    }
+    public func send(_ command: WiFiJoinCommand, lineEnding: String = "\n") throws {
+        try writeCommand(command.wireValue, lineEnding: lineEnding)
+    }
+    private func writeCommand(_ command: String, lineEnding: String) throws {
         guard isOpen else { throw SerialError("Connect to your Flipper first.") }
-        let validated = try CommandValidation.validate(command)
         guard ["\n", "\r\n", "\r"].contains(lineEnding) else { throw SerialError("Unsupported line ending.") }
-        let data = Data((validated + lineEnding).utf8)
+        let data = Data((command + lineEnding).utf8)
         guard pendingWrites.count + data.count <= 65_536 else { throw SerialError("Serial output is busy. Wait for the device to read pending commands.") }
         pendingWrites.append(data)
         try flushWrites()

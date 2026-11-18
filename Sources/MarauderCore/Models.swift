@@ -60,6 +60,13 @@ public struct LineFramer {
         }
         return lines
     }
+    public mutating func takeWiFiJoinPrompt() -> String? {
+        guard !dropping, pending.last == 32 else { return nil }
+        let line = String(decoding: pending, as: UTF8.self)
+        guard WiFiJoin.isCompletionPrompt(line) else { return nil }
+        pending.removeAll(keepingCapacity: true)
+        return line
+    }
     public mutating func reset() { pending.removeAll(); dropping = false; droppedLines = 0 }
 }
 

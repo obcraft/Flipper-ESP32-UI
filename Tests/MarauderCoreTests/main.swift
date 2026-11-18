@@ -76,6 +76,11 @@ run("hidden network list preserves empty SSID") {
     expectEqual(inventory.accessPoints["AA:BB:CC:DD:EE:FF"]?.index, 5)
 }
 run("real serial I/O through a pseudo-terminal", serialRoundTripCheck)
+let wifiJoin = WiFiJoinTests()
+run("Wi-Fi join resolves duplicate APs and waits for firmware completion", wifiJoin.verifiesDuplicateAPsAndWaitsForFirmwarePrompt)
+run("Wi-Fi join rejects unsupported and unverified targets", wifiJoin.rejectsUnsupportedAndUnverifiedTargets)
+run("Wi-Fi join failure and credential echo detection", wifiJoin.handlesRejectedPasswordAndKeepsCommandEchoRecognizable)
+run("Wi-Fi password serialization follows the firmware tokenizer", wifiJoin.encodesPasswordsForFirmwareTokenizer)
 run("macOS network record import and 5 GHz rejection") {
     let record = "'Bellamyplein18' {length = 14, bytes = 0x42656c6c616d79706c65696e3138}, bssid=6a:07:1d:3d:05:a3, channel=[36, width=160], cc=DE, type=11ax, rssi=-45, rsn=(null), wpa=(null), wep=no"
     let target = try ImportedTarget.parse(record)
